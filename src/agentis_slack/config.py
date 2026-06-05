@@ -41,9 +41,9 @@ class Settings:
     default_adapter: str = ""
     default_adapter_engine: str = ""
     default_environment: str = ""
-    agentiscode_command: str = "poetry run agentiscode"
+    agentiscode_command: str = "agentiscode"
     agentiscode_dir: str = "/var/www/agentis-adapter"
-    agentiscode_adapter: str = "opencode"
+    agentiscode_adapter: str = "claude"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,9 +64,7 @@ class Settings:
             default_adapter=os.getenv("AGENTIS_DEFAULT_ADAPTER", ""),
             default_adapter_engine=os.getenv("AGENTIS_DEFAULT_ADAPTER_ENGINE", ""),
             default_environment=os.getenv("AGENTIS_DEFAULT_ENVIRONMENT", ""),
-            agentiscode_command=os.getenv(
-                "AGENTISCODE_COMMAND", "poetry run agentiscode"
-            ),
+            agentiscode_command=os.getenv("AGENTISCODE_COMMAND", "agentiscode"),
             agentiscode_dir=os.getenv("AGENTISCODE_DIR", "/var/www/agentis-adapter"),
             agentiscode_adapter=os.getenv(
                 "AGENTISCODE_ADAPTER",

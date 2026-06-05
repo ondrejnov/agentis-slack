@@ -249,7 +249,7 @@ class SlackMentionService:
         return {"replied": True, "message": posted}
 
     def run_agentiscode(self, task_id: str, prompt: str) -> str:
-        final_message_parts: list[str] = []
+        last_text_message = ""
         proc = subprocess.Popen(
             self.build_agentiscode_args(task_id, prompt),
             cwd=self.settings.agentiscode_dir,
@@ -265,12 +265,12 @@ class SlackMentionService:
             sys.stdout.flush()
             payload = self._parse_json_line(line)
             if payload and payload.get("type") == "text":
-                final_message_parts.append(str(payload.get("text") or ""))
+                last_text_message = str(payload.get("text") or "")
 
         proc.wait()
         if proc.returncode:
             raise RuntimeError(f"agentiscode exited with code {proc.returncode}")
-        return "".join(final_message_parts).strip()
+        return last_text_message.strip()
 
     def build_agentiscode_args(self, task_id: str, prompt: str) -> list[str]:
         args = [
