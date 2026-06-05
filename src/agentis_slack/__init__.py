@@ -1,0 +1,1 @@
+"""Small Slack mention responder."""
