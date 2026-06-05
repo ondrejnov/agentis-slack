@@ -109,14 +109,64 @@ class SlackMentionService:
         text = normalize_slack_text(
             str(event.get("text") or ""), bot_user_id=self.bot_user_id
         )
-        reply = markdown_to_slack_mrkdwn(text)
+        print(text)
+        history = self.fetch_thread_history(channel_id, thread_ts)
+        # attachments, file_refs = self.sync_event_files(history)
+        headers = self.build_headers(event, thread_ts=thread_ts, files=[])
+        context_text = slack_history_to_context(history)
+        body = (
+            text
+            if not context_text
+            else f"{text}\n\nSlack thread history:\n{context_text}"
+        )
 
+        task_data = {
+            "title": text[:80] or "Slack mention",
+            "description": plaintext_to_lexical(body),
+            "headers": headers,
+            # "attachments": attachments,
+            "project": self.settings.default_project,
+            "agent": self.settings.default_agent,
+            "model": {
+                "id": self.settings.default_model,
+                "effort": self.settings.default_effort,
+            }
+            if self.settings.default_model
+            else None,
+            "adapter": self.settings.default_adapter,
+            "adapter_options": {"engine": self.settings.default_adapter_engine}
+            if self.settings.default_adapter_engine
+            else None,
+            "environment": self.settings.default_environment,
+            # "labels": ["019e4eb9-6a52-7bbd-bcd6-fd9f7482263a"],
+            "worktree": False,
+        }
+        saved = self.agentis_client.save_task(
+            {key: value for key, value in task_data.items() if value is not None}
+        )
+        task_id = saved["form"]["id"]
+        print(task_id)
+        # run = self.agentis.start_run(task_id, start_adapter=True)
+        self.slack_client.reactions_add(
+            channel=channel_id,
+            timestamp=message_ts,
+            name="eyes",
+        )
+        final_message = self.run_agentiscode(task_id, body)
+
+        reply = markdown_to_slack_mrkdwn(final_message)
         posted = self.slack_client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
             text=reply,
             mrkdwn=True,
         )
+        _remove_slack_reaction(self.slack_client, channel_id, message_ts, "eyes")
+
+        self.agentis_client.add_agent_comment(
+            task=task_id, body=final_message, status=5
+        )
+
         return {"replied": True, "message": posted}
 
     def handle_message(self, event: dict[str, Any], event_id) -> dict[str, Any]:
