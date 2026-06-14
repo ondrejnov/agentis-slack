@@ -5,6 +5,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from .agentis_client import AgentisClient
 from .config import Settings
+from .slack_blocks import QUESTION_OPEN_ACTION, QUESTION_SUBMIT_CALLBACK
 from .slack_service import SlackMentionService
 
 
@@ -31,6 +32,15 @@ def create_app(settings: Settings) -> App:
         print(event)
         ack()
         service.handle_message(event, event_id=body.get("event_id"))
+
+    @app.action(QUESTION_OPEN_ACTION)
+    def on_question_open(ack, body, client):
+        ack()
+        service.open_question_modal(body, client)
+
+    @app.view(QUESTION_SUBMIT_CALLBACK)
+    def on_question_submit(ack, body, view, client):
+        service.submit_question_modal(ack, view, client)
 
     return app
 

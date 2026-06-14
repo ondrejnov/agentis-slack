@@ -10,10 +10,13 @@ dependencies = [
     "slack-bolt>=1.27.0",
     "requests (>=2.34.2,<3.0.0)",
     "markdown-to-mrkdwn (>=0.3.3,<0.4.0)",
+    "mcp (>=1.9.0)",
+    "psutil (>=5.9)",
 ]
 
 [project.scripts]
 agentis-slack = "agentis_slack.main:main"
+agentis-slack-mcp = "agentis_slack.question_mcp:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

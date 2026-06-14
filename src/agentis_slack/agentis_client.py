@@ -87,6 +87,24 @@ class AgentisClient:
             },
         )
 
+    def add_question(
+        self,
+        questions: list[dict],
+        *,
+        external_id: str,
+        session_id: str | None = None,
+    ) -> dict:
+        params: dict[str, Any] = {"id": external_id, "questions": questions}
+        if session_id:
+            params["session_id"] = session_id
+        return self.rpc("task.add_question", params)
+
+    def get_question_result(self, external_id: str) -> dict:
+        return self.rpc("task.get_question_result", {"external_id": external_id})
+
+    def fetch_task(self, task_id: str) -> dict:
+        return self.rpc("task.fetch", {"id": task_id})
+
     def question_reply(self, external_id: str, results: list[dict]) -> dict:
         return self.rpc(
             "task.question_reply", {"external_id": external_id, "results": results}

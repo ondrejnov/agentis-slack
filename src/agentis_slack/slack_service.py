@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from agentis_slack.agentis_client import AgentisClient
 
 from .config import Settings
 from .guards import EventDeduper, GlobalRateLimiter, should_ignore_event
+from .slack_blocks import build_question_modal, parse_modal_submission
 from .text import normalize_slack_text, slack_history_to_context
 
 
@@ -132,6 +134,81 @@ class SlackMentionService:
         except Exception as e:
             print(e)
             self._add_slack_reaction(channel_id, message_ts, "fail")
+
+    def open_question_modal(self, body: dict[str, Any], client: Any) -> None:
+        """Klik na „Odpovědět" → dotáhni dávku z backendu a otevři modal.
+
+        ``external_id``/``task_id`` jsou ve ``value`` tlačítka; kanál a ts zprávy
+        (pro pozdější update) bere modal z action payloadu přes private_metadata.
+        """
+        actions = body.get("actions") or []
+        if not actions:
+            return
+        try:
+            value = json.loads(actions[0].get("value") or "{}")
+        except ValueError:
+            return
+        external_id = str(value.get("e") or "")
+        task_id = value.get("t")
+        if not external_id or not task_id:
+            return
+
+        group = self._find_question_group(task_id, external_id)
+        if group is None:
+            return
+
+        channel = (body.get("channel") or {}).get("id") or ""
+        message_ts = (body.get("message") or {}).get("ts") or ""
+        view = build_question_modal(group, channel=channel, message_ts=message_ts)
+        try:
+            client.views_open(trigger_id=body.get("trigger_id"), view=view)
+        except Exception as e:
+            print(e)
+
+    def submit_question_modal(self, ack: Any, view: dict[str, Any], client: Any) -> None:
+        """Submit modalu → poskládej ``results`` a zapiš přes ``question_reply``."""
+        external_id, channel, message_ts, results, errors = parse_modal_submission(view)
+        if errors:
+            ack(response_action="errors", errors=errors)
+            return
+        ack()
+        if not external_id:
+            return
+        try:
+            self.agentis_client.question_reply(external_id, results)
+        except Exception as e:
+            print(e)
+            return
+        self._mark_question_answered(channel, message_ts, client)
+
+    def _find_question_group(self, task_id: str, external_id: str) -> dict[str, Any] | None:
+        try:
+            task = self.agentis_client.fetch_task(task_id)
+        except Exception as e:
+            print(e)
+            return None
+        for group in task.get("questions") or []:
+            if str(group.get("external_id")) == external_id:
+                return group
+        return None
+
+    def _mark_question_answered(self, channel: str, message_ts: str, client: Any) -> None:
+        if not channel or not message_ts:
+            return
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=message_ts,
+                text="✅ Zodpovězeno",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "✅ *Zodpovězeno*"},
+                    }
+                ],
+            )
+        except Exception as e:
+            print(e)
 
     def _add_slack_reaction(self, channel_id: str, message_ts: str, name: str) -> None:
         if not channel_id or not message_ts:
