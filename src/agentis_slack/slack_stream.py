@@ -40,7 +40,7 @@ import urllib.request
 from pathlib import Path
 
 STREAM_HEADER = "⏳ _Pracuju na tom…_"
-SNIPPET_LIMIT = 150
+SNIPPET_LIMIT = 400
 
 
 def _read_env_file(name: str) -> str:
