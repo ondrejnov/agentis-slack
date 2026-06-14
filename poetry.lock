@@ -167,6 +167,18 @@ files = [
 all = ["mypy (>=1.11.2)", "pytest (>=8.3.2)", "ruff (>=0.6.2)"]
 
 [[package]]
+name = "markdown-to-mrkdwn"
+version = "0.3.3"
+description = "A library to convert Markdown to Slack's mrkdwn format"
+optional = false
+python-versions = ">=3.6"
+groups = ["main"]
+files = [
+    {file = "markdown_to_mrkdwn-0.3.3-py3-none-any.whl", hash = "sha256:4164538e370aea9a5b5e0ee688128b722c1d14d9f9fbd6014745273eca63032f"},
+    {file = "markdown_to_mrkdwn-0.3.3.tar.gz", hash = "sha256:5a2c0c8b8b73eb1051fe82d1a2ae9864d72bf7f6877f8add9589d01de33defd4"},
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 description = "Python HTTP for Humans."
@@ -239,4 +251,4 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13"
-content-hash = "f489f29ec9fa8598eb14294439f51910e939ead4e60fcde11bcaa217891c57e2"
+content-hash = "3ba2013e623de663db15fd5e9d85428c6a3d43bdd115ef02bac5a578d4f57098"

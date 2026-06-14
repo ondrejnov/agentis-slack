@@ -1,37 +1,12 @@
 from __future__ import annotations
 
-import json
-import shlex
-import subprocess
-import sys
-from collections.abc import Callable
 from typing import Any
 
 from agentis_slack.agentis_client import AgentisClient
 
 from .config import Settings
 from .guards import EventDeduper, GlobalRateLimiter, should_ignore_event
-from .text import (
-    markdown_to_slack_mrkdwn,
-    normalize_slack_text,
-    slack_history_to_context,
-)
-
-
-ReplyBuilder = Callable[[str, dict[str, Any]], str]
-
-
-def _remove_slack_reaction(
-    slack_client: Any, channel_id, message_ts, name: str
-) -> None:
-    if not channel_id or not message_ts:
-        return
-    try:
-        slack_client.reactions_remove(
-            channel=channel_id, timestamp=message_ts, name=name
-        )
-    except Exception:
-        return
+from .text import normalize_slack_text, slack_history_to_context
 
 
 def plaintext_to_lexical(text: str) -> dict:
@@ -91,6 +66,16 @@ class SlackMentionService:
     def handle_app_mention(
         self, event: dict[str, Any], *, event_id: str | None = None
     ) -> dict[str, Any]:
+        return self._handle_event(event, event_id=event_id)
+
+    def handle_message(
+        self, event: dict[str, Any], event_id: str | None = None
+    ) -> dict[str, Any]:
+        return self._handle_event(event, event_id=event_id)
+
+    def _handle_event(
+        self, event: dict[str, Any], *, event_id: str | None = None
+    ) -> dict[str, Any]:
         if should_ignore_event(event, bot_user_id=self.bot_user_id):
             return {"ignored": True, "reason": "bot"}
 
@@ -106,197 +91,57 @@ class SlackMentionService:
         if not channel_id or not message_ts:
             return {"ignored": True, "reason": "missing_channel_or_ts"}
 
-        text = normalize_slack_text(
-            str(event.get("text") or ""), bot_user_id=self.bot_user_id
-        )
-        print(text)
-        history = self.fetch_thread_history(channel_id, thread_ts)
-        # attachments, file_refs = self.sync_event_files(history)
-        headers = self.build_headers(event, thread_ts=thread_ts, files=[])
-        context_text = slack_history_to_context(history)
-        body = (
-            text
-            if not context_text
-            else f"{text}\n\nSlack thread history:\n{context_text}"
-        )
-
-        task_data = {
-            "title": text[:80] or "Slack mention",
-            "description": plaintext_to_lexical(body),
-            "headers": headers,
-            # "attachments": attachments,
-            "project": self.settings.default_project,
-            "agent": self.settings.default_agent,
-            "model": {
-                "id": self.settings.default_model,
-                "effort": self.settings.default_effort,
-            }
-            if self.settings.default_model
-            else None,
-            "adapter": self.settings.default_adapter,
-            "adapter_options": {"engine": self.settings.default_adapter_engine}
-            if self.settings.default_adapter_engine
-            else None,
-            "environment": self.settings.default_environment,
-            # "labels": ["019e4eb9-6a52-7bbd-bcd6-fd9f7482263a"],
-            "worktree": False,
-        }
-        saved = self.agentis_client.save_task(
-            {key: value for key, value in task_data.items() if value is not None}
-        )
-        task_id = saved["form"]["id"]
-        print(task_id)
-        # run = self.agentis.start_run(task_id, start_adapter=True)
-        self.slack_client.reactions_add(
-            channel=channel_id,
-            timestamp=message_ts,
-            name="eyes",
-        )
-        final_message = self.run_agentiscode(task_id, body)
-
-        reply = markdown_to_slack_mrkdwn(final_message)
-        posted = self.slack_client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=reply,
-            mrkdwn=True,
-        )
-        _remove_slack_reaction(self.slack_client, channel_id, message_ts, "eyes")
-
-        self.agentis_client.add_agent_comment(
-            task=task_id, body=final_message, status=5
-        )
-
-        return {"replied": True, "message": posted}
-
-    def handle_message(self, event: dict[str, Any], event_id) -> dict[str, Any]:
-        if should_ignore_event(event, bot_user_id=self.bot_user_id):
-            return {"ignored": True, "reason": "bot"}
-
-        channel_id = str(event.get("channel") or "")
-        message_ts = str(event.get("ts") or "")
-        thread_ts = str(event.get("thread_ts") or message_ts)
-        dedupe_key = event_id or f"{event.get('team')}:{channel_id}:{message_ts}"
-
-        if self.deduper.seen_before(dedupe_key):
-            return {"ignored": True, "reason": "duplicate"}
-        if not self.rate_limiter.allow():
-            return {"ignored": True, "reason": "rate_limited"}
-        if not channel_id or not message_ts:
-            return {"ignored": True, "reason": "missing_channel_or_ts"}
-
-        text = normalize_slack_text(
-            str(event.get("text") or ""), bot_user_id=self.bot_user_id
-        )
-        print(text)
-        history = self.fetch_thread_history(channel_id, thread_ts)
-        # attachments, file_refs = self.sync_event_files(history)
-        headers = self.build_headers(event, thread_ts=thread_ts, files=[])
-        context_text = slack_history_to_context(history)
-        body = (
-            text
-            if not context_text
-            else f"{text}\n\nSlack thread history:\n{context_text}"
-        )
-
-        task_data = {
-            "title": text[:80] or "Slack mention",
-            "description": plaintext_to_lexical(body),
-            "headers": headers,
-            # "attachments": attachments,
-            "project": self.settings.default_project,
-            "agent": self.settings.default_agent,
-            "model": {
-                "id": self.settings.default_model,
-                "effort": self.settings.default_effort,
-            }
-            if self.settings.default_model
-            else None,
-            "adapter": self.settings.default_adapter,
-            "adapter_options": {"engine": self.settings.default_adapter_engine}
-            if self.settings.default_adapter_engine
-            else None,
-            "environment": self.settings.default_environment,
-            # "labels": ["019e4eb9-6a52-7bbd-bcd6-fd9f7482263a"],
-            "worktree": False,
-        }
-        saved = self.agentis_client.save_task(
-            {key: value for key, value in task_data.items() if value is not None}
-        )
-        task_id = saved["form"]["id"]
-        print(task_id)
-        # run = self.agentis.start_run(task_id, start_adapter=True)
-        self.slack_client.reactions_add(
-            channel=channel_id,
-            timestamp=message_ts,
-            name="eyes",
-        )
-        final_message = self.run_agentiscode(task_id, body)
-
-        reply = markdown_to_slack_mrkdwn(final_message)
-        posted = self.slack_client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=reply,
-            mrkdwn=True,
-        )
-        _remove_slack_reaction(self.slack_client, channel_id, message_ts, "eyes")
-
-        self.agentis_client.add_agent_comment(
-            task=task_id, body=final_message, status=5
-        )
-
-        return {"replied": True, "message": posted}
-
-    def run_agentiscode(self, task_id: str, prompt: str) -> str:
-        last_text_message = ""
-        proc = subprocess.Popen(
-            self.build_agentiscode_args(task_id, prompt),
-            cwd=self.settings.agentiscode_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        assert proc.stdout is not None
-
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            payload = self._parse_json_line(line)
-            if payload and payload.get("type") == "text":
-                last_text_message = str(payload.get("text") or "")
-
-        proc.wait()
-        if proc.returncode:
-            raise RuntimeError(f"agentiscode exited with code {proc.returncode}")
-        return last_text_message.strip()
-
-    def build_agentiscode_args(self, task_id: str, prompt: str) -> list[str]:
-        args = [
-            *shlex.split(self.settings.agentiscode_command),
-            "--adapter",
-            self.settings.agentiscode_adapter,
-            "--json",
-            "--task-id",
-            task_id,
-        ]
-        if self.settings.agentis_api_url:
-            args.extend(["--agentis-api", self.settings.agentis_api_url])
-        if self.settings.agentis_token:
-            args.extend(["--agentis-token", self.settings.agentis_token])
-        if self.settings.default_effort:
-            args.extend(["--effort", self.settings.default_effort])
-        args.append(prompt)
-        return args
-
-    @staticmethod
-    def _parse_json_line(line: str) -> dict[str, Any] | None:
         try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        return payload if isinstance(payload, dict) else None
+            text = normalize_slack_text(
+                str(event.get("text") or ""), bot_user_id=self.bot_user_id
+            )
+            history = self.fetch_thread_history(channel_id, thread_ts)
+            headers = self.build_headers(event, thread_ts=thread_ts, files=[])
+            context_text = slack_history_to_context(history)
+            body = (
+                text
+                if not context_text
+                else f"{text}\n\nSlack thread history:\n\n{context_text}"
+            )
+
+            task_data = {
+                "title": text[:80] or "Slack mention",
+                "description": plaintext_to_lexical(body),
+                "headers": headers,
+                "project": self.settings.default_project,
+                "agent": self.settings.default_agent,
+                "model": {
+                    "id": self.settings.default_model,
+                    "effort": self.settings.default_effort,
+                }
+                if self.settings.default_model
+                else None,
+                "adapter": self.settings.default_adapter,
+                "adapter_options": [{"key": "workflow", "value": "slack"}],
+                "environment": self.settings.default_environment,
+                "worktree": False,
+            }
+            saved = self.agentis_client.save_task(
+                {key: value for key, value in task_data.items() if value is not None}
+            )
+            task_id = saved["form"]["id"]
+            self.agentis_client.start_run(task_id)
+            self._add_slack_reaction(channel_id, message_ts, "eyes")
+            return {"created": True, "task_id": task_id}
+
+        except Exception as e:
+            print(e)
+            self._add_slack_reaction(channel_id, message_ts, "fail")
+
+    def _add_slack_reaction(self, channel_id: str, message_ts: str, name: str) -> None:
+        if not channel_id or not message_ts:
+            return
+        try:
+            self.slack_client.reactions_add(
+                channel=channel_id, timestamp=message_ts, name=name
+            )
+        except Exception:
+            return
 
     def fetch_thread_history(
         self, channel_id: str, thread_ts: str

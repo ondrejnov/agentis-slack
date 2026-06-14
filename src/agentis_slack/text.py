@@ -173,4 +173,4 @@ def slack_history_to_context(messages: list[dict]) -> str:
         text = normalize_slack_text(str(message.get("text") or ""))
         if text:
             lines.append(f"[{user}] {text}")
-    return "\n".join(lines)
+    return "\n\n".join(lines)

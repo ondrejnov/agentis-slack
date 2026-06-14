@@ -98,7 +98,6 @@ class AgentisClient:
                 self.api_url.rsplit("/api", 1)[0] + "/api/file/upload",
                 files={"file": (label or path.name, file_obj)},
                 headers={
-                    "Authorization": f"Bearer {self.service_token}",
                     "X-Auth-Token": self.service_token,
                 },
                 timeout=self.timeout,

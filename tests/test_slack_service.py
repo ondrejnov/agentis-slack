@@ -29,14 +29,14 @@ class FakeAgentisClient:
         return {"form": {"id": "task-1"}}
 
 
-def test_handle_app_mention_replies_in_thread_with_formatted_text():
+def test_handle_app_mention_creates_task_and_acknowledges():
     slack = FakeSlackClient()
+    agentis = FakeAgentisClient()
     service = SlackMentionService(
         slack_client=slack,
-        agentis_client=object(),
+        agentis_client=agentis,
         settings=make_settings(),
         bot_user_id="Ubot",
-        reply_builder=lambda message, event: f"**Reply:** {message}",
     )
 
     result = service.handle_app_mention(
@@ -44,17 +44,19 @@ def test_handle_app_mention_replies_in_thread_with_formatted_text():
         event_id="evt-1",
     )
 
-    assert result["replied"] is True
-    assert slack.messages == [
-        {"channel": "C1", "thread_ts": "1.0", "text": "*Reply:* hello", "mrkdwn": True}
-    ]
+    assert result == {"created": True, "task_id": "task-1"}
+    assert agentis.saved_payload["title"] == "hello"
+    assert slack.reactions == [{"channel": "C1", "timestamp": "1.0", "name": "eyes"}]
+    # The service only creates a task; it must not reply in the thread.
+    assert slack.messages == []
 
 
 def test_handle_app_mention_ignores_duplicate_event():
     slack = FakeSlackClient()
+    agentis = FakeAgentisClient()
     service = SlackMentionService(
         slack_client=slack,
-        agentis_client=object(),
+        agentis_client=agentis,
         settings=make_settings(),
         bot_user_id="Ubot",
     )
@@ -64,10 +66,10 @@ def test_handle_app_mention_ignores_duplicate_event():
     result = service.handle_app_mention(event, event_id="evt-1")
 
     assert result == {"ignored": True, "reason": "duplicate"}
-    assert len(slack.messages) == 1
+    assert len(slack.reactions) == 1
 
 
-def test_handle_message_runs_agentiscode_with_saved_task_id(monkeypatch):
+def test_handle_message_creates_task_with_saved_task_id():
     slack = FakeSlackClient()
     agentis = FakeAgentisClient()
     service = SlackMentionService(
@@ -76,52 +78,12 @@ def test_handle_message_runs_agentiscode_with_saved_task_id(monkeypatch):
         settings=make_settings(),
         bot_user_id="Ubot",
     )
-    calls = []
-
-    def fake_run_agentiscode(task_id, prompt):
-        calls.append((task_id, prompt))
-        return "final answer"
-
-    monkeypatch.setattr(service, "run_agentiscode", fake_run_agentiscode)
 
     result = service.handle_message(
         {"team": "T1", "channel": "C1", "ts": "1.0", "text": "hello"},
         event_id="evt-1",
     )
 
-    assert result == {"ok": True, "final_message": "final answer"}
-    assert calls == [("task-1", "hello")]
+    assert result == {"created": True, "task_id": "task-1"}
     assert slack.reactions == [{"channel": "C1", "timestamp": "1.0", "name": "eyes"}]
-
-
-def test_build_agentiscode_args_passes_task_id_and_prompt():
-    settings = Settings(
-        slack_bot_token="xoxb-test",
-        slack_app_token="xapp-test",
-        agentis_api_url="https://agentis.example/api",
-        agentis_token="token-1",
-        default_effort="high",
-        agentiscode_command="/usr/local/bin/agentiscode",
-        agentiscode_adapter="claude",
-    )
-    service = SlackMentionService(
-        slack_client=FakeSlackClient(),
-        agentis_client=object(),
-        settings=settings,
-    )
-
-    assert service.build_agentiscode_args("task-1", "udelej X") == [
-        "/usr/local/bin/agentiscode",
-        "--adapter",
-        "claude",
-        "--json",
-        "--task-id",
-        "task-1",
-        "--agentis-api",
-        "https://agentis.example/api",
-        "--agentis-token",
-        "token-1",
-        "--effort",
-        "high",
-        "udelej X",
-    ]
+    assert slack.messages == []
