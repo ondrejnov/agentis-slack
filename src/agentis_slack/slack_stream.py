@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""Tee JSON Lines eventů agenta + průběžná editace pending zprávy ve Slacku.
+"""Tee JSON Lines eventů agenta + průběžný text streaming do Slacku.
 
 Použití ve workflow kroku (viz `.agentis/workflows/slack.yaml`):
 
     agentiscode --json ... | python3 scripts/slack_stream.py
 
 Stdin (JSON Lines z `agentiscode --json`) se beze změny propouští na stdout,
-takže log kroku zůstává kompletní. Po cestě se z eventů skládá jednořádkový
-stav („právě běží nástroj X“, poslední reasoning) a throttlovaně se jím
-edituje pending zpráva ve Slacku přes `chat.update`.
+takže log kroku zůstává kompletní. Po cestě se z eventů skládají jednořádkové
+kroky („právě běží nástroj X“, poslední reasoning) a ty se přilepují jako
+streamovací řádky do samostatné AI-agent streaming zprávy podle
+https://docs.slack.dev/ai/developing-agents — `chat.startStream` ji založí,
+`chat.appendStream` doplňuje další řádky a `chat.stopStream` ji na konci uzavře.
 
 Konfigurace přes env (chybějící hodnoty = čistý tee, žádné volání Slacku):
 
-- ``TASK_HEADER_SLACK_CHANNEL`` / ``TASK_HEADER_SLACK_MESSAGE_TS`` — adresát,
-  ts pending zprávy posílá bridge v task headers,
+- ``TASK_HEADER_SLACK_CHANNEL`` / ``TASK_HEADER_SLACK_THREAD_TS`` — adresát a
+  kořen threadu, pod který se streamovaná zpráva pověsí (předává bridge v task
+  headers; ``THREAD_TS`` fallbackuje na ``MESSAGE_TS``),
+- ``TASK_HEADER_SLACK_USER`` / ``TASK_HEADER_SLACK_TEAM`` — recipient pro stream
+  do kanálu (Slack je u kanálových streamů vyžaduje; v DM/assistant threadu se
+  vynechají),
 - ``SLACK_BOT_TOKEN`` — ze sourcovaného ``slack.env``,
-- ``SLACK_STREAM_INTERVAL`` — minimální odstup editací v sekundách (default 3;
-  chat.update je Slack rate-limit Tier 3, ~50/min, default drží ~20/min).
+- ``SLACK_STREAM_INTERVAL`` — minimální odstup appendů v sekundách (default 3).
+  ``chat.appendStream`` je Slack rate-limit Tier 4 (100+/min), takže prostor je;
+  throttle jen sdružuje řádky, ať append nestřílíme po jednom znaku.
 
 Updater nikdy neshazuje pipeline: chyby Slacku jen loguje na stderr a stream
-propouští dál. Finální odpověď do pending zprávy zapisuje až následný krok
-workflow — tady se řeší jen průběh.
+propouští dál. Finální odpověď posílá jako samostatnou zprávu až následný krok
+workflow — tady se streamuje jen průběh.
 """
 
 from __future__ import annotations
@@ -32,29 +39,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-PENDING_PREFIX = "⏳ _Pracuju na tom…_"
+STREAM_HEADER = "⏳ _Pracuju na tom…_"
 SNIPPET_LIMIT = 150
-# Kolik posledních kroků držet v logu. chat.update má strop ~4000 znaků,
-# tohle drží zprávu pohodlně pod ním i s dlouhými řádky.
-MAX_LOG_LINES = 30
-
-# Generické "ještě nevím, co dělám" hlášky pro nativní stav threadu. Předáváme
-# je do `assistant.threads.setStatus` jako `loading_messages` (volitelné pole,
-# max 10) a rotaci skrz ně si řeší sám Slack. Zobrazí je jako „<App> <status>“,
-# takže to jsou slovesa ve 3. osobě jednotného čísla. Limit 10 nepřekračovat —
-# Slack delší pole odmítne.
-LOADING_MESSAGES = (
-    "rozjíždí pody…",
-    "čeká na zelenou pipelinu…",
-    "applyuje Terraform plan…",
-    "rolluje deploy bez výpadku…",
-    "honí flaky test v CI…",
-    "drainuje nódu před údržbou…",
-    "rotuje secrets ve vaultu…",
-    "kouká, kdo zase shodil main…",
-    "potvrzuje, že to není DNS… nebo je?",
-    "popíjí kafe, než dojede build…",
-)
 
 
 def _read_env_file(name: str) -> str:
@@ -86,10 +72,14 @@ def _resolve_token() -> str:
     return os.environ.get("SLACK_BOT_TOKEN") or _read_env_file("SLACK_BOT_TOKEN")
 
 
-def _post_update(channel: str, ts: str, token: str, text: str) -> None:
-    payload = {"channel": channel, "ts": ts, "text": text}
+def _slack_api(method: str, token: str, payload: dict) -> dict | None:
+    """Zavolej Slack Web API metodu JSONem. Nikdy nevyhazuje — chyby loguje.
+
+    Vrací rozparsované tělo odpovědi (i když ``ok`` je false, ať si volající
+    může vytáhnout např. ``ts``), nebo ``None`` při síťové/parsovací chybě.
+    """
     request = urllib.request.Request(
-        "https://slack.com/api/chat.update",
+        f"https://slack.com/api/{method}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {token}",
@@ -99,13 +89,67 @@ def _post_update(channel: str, ts: str, token: str, text: str) -> None:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             body = json.loads(response.read().decode("utf-8"))
-        if not body.get("ok"):
-            print(
-                f"slack-stream: chat.update odmítnut: {body.get('error')}",
-                file=sys.stderr,
-            )
     except Exception as exc:  # noqa: BLE001 — updater nesmí shodit běh agenta
-        print(f"slack-stream: chat.update selhal: {exc}", file=sys.stderr)
+        print(f"slack-stream: {method} selhal: {exc}", file=sys.stderr)
+        return None
+    if not body.get("ok"):
+        print(f"slack-stream: {method} odmítnut: {body.get('error')}", file=sys.stderr)
+    return body
+
+
+def _start_stream(
+    channel: str,
+    thread_ts: str,
+    token: str,
+    *,
+    recipient_user_id: str = "",
+    recipient_team_id: str = "",
+    text: str = "",
+) -> str | None:
+    """Založ AI-agent streaming zprávu (`chat.startStream`) a vrať její ``ts``.
+
+    ``recipient_*`` Slack vyžaduje jen u streamu do kanálu; v DM/assistant
+    threadu jsou prázdné a vynecháme je. Při selhání vrací ``None`` (volající si
+    pak streaming vypne a doběhne jako čistý tee).
+    """
+    payload: dict = {"channel": channel, "thread_ts": thread_ts}
+    if text:
+        payload["markdown_text"] = text
+    if recipient_user_id:
+        payload["recipient_user_id"] = recipient_user_id
+    if recipient_team_id:
+        payload["recipient_team_id"] = recipient_team_id
+    body = _slack_api("chat.startStream", token, payload)
+    if not body or not body.get("ok"):
+        return None
+    return body.get("ts")
+
+
+def _append_stream(
+    channel: str, ts: str, thread_ts: str, token: str, text: str
+) -> None:
+    """Přilep další kus textu do běžícího streamu (`chat.appendStream`).
+
+    ``markdown_text`` se k dosavadní zprávě připojuje, posíláme tedy jen delta
+    (nové řádky), ne celý log znovu. Limit pole je 12 000 znaků na volání — naše
+    řádky jsou krátké, takže s rezervou stačí.
+    """
+    _slack_api(
+        "chat.appendStream",
+        token,
+        {"channel": channel, "ts": ts, "thread_ts": thread_ts, "markdown_text": text},
+    )
+
+
+def _stop_stream(channel: str, ts: str, thread_ts: str, token: str) -> None:
+    """Uzavři stream (`chat.stopStream`) — Slack zprávu finalizuje a sundá z ní
+    streamovací indikátor. Žádný další ``markdown_text`` už nepřidáváme; finální
+    odpověď posílá samostatně následný krok workflow."""
+    _slack_api(
+        "chat.stopStream",
+        token,
+        {"channel": channel, "ts": ts, "thread_ts": thread_ts},
+    )
 
 
 def _post_status(
@@ -113,37 +157,16 @@ def _post_status(
     thread_ts: str,
     token: str,
     status: str,
-    loading_messages: list[str] | None = None,
 ) -> None:
     """Nastav nativní stav assistant threadu přes `assistant.threads.setStatus`.
 
     Slack ho zobrazí jako „<App> <status>“ v hlavičce threadu. Má ~2min timeout,
     po kterém zmizí sám; prázdný ``status`` ho smaže ručně. Volitelné
     ``loading_messages`` (max 10) Slack sám rotuje jako loading animaci, dokud
-    neznáme konkrétní krok. Stejně jako `_post_update` nikdy neshodí pipeline —
-    chyby jen loguje na stderr.
+    neznáme konkrétní krok.
     """
-    payload = {"channel_id": channel, "thread_ts": thread_ts, "status": status}
-    if loading_messages:
-        payload["loading_messages"] = loading_messages
-    request = urllib.request.Request(
-        "https://slack.com/api/assistant.threads.setStatus",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        if not body.get("ok"):
-            print(
-                f"slack-stream: setStatus odmítnut: {body.get('error')}",
-                file=sys.stderr,
-            )
-    except Exception as exc:  # noqa: BLE001 — updater nesmí shodit běh agenta
-        print(f"slack-stream: setStatus selhal: {exc}", file=sys.stderr)
+    payload: dict = {"channel_id": channel, "thread_ts": thread_ts, "status": status}
+    _slack_api("assistant.threads.setStatus", token, payload)
 
 
 def _status_from_steps(steps: list[tuple[str, str]]) -> tuple[str, list[str] | None]:
@@ -167,10 +190,10 @@ def _step_from_event(event: dict) -> tuple[str, str] | None:
 
     Eventy jsou ploché — pole (`name`, `status`, `title`, `text`, …) jsou přímo
     na top-levelu eventu, žádný vnořený `data` klíč není. Vrací dvojici
-    ``(kind, řádek)`` bez hlavičky; tu přidává `_render_log` jednou na začátek
-    zprávy. ``kind`` rozlišuje typ kroku, aby `_render_log` poznal koncový
-    `text` (finální odpověď) a nezdvojoval ho — tu zapisuje samostatně až
-    následný krok workflow.
+    ``(kind, řádek)`` bez hlavičky; tu přidává start streamu jednou na začátku.
+    ``kind`` rozlišuje typ kroku, aby volající poznal koncový `text` (finální
+    odpověď) a nepřilepil ho do streamu — tu posílá samostatně až následný krok
+    workflow.
     """
     event_type = event.get("type") or ""
     # Skill invokace přijde buď jako vlastní `type: "skill"` s atributy přímo na
@@ -187,7 +210,18 @@ def _step_from_event(event: dict) -> tuple[str, str] | None:
         name = event.get("name") or "tool"
         title = event.get("title") or ""
         suffix = f" {title[:SNIPPET_LIMIT]}" if title and title != name else ""
-        return "tool", f"⚙ `{name}`{suffix}"
+        if name == "Bash":
+            return "tool", f"🔧 `{name}`{suffix}"
+        if name == "Read":
+            return "tool", f"📖 `{name}`{suffix}"
+        elif name == "Edit" or name == "Write":
+            return "tool", f"✏️ `{name}`{suffix}"
+        elif name == "Webfetch":
+            return "tool", f"🌐 `{name}`{suffix}"
+        elif name.startswith("mcp__"):
+            return "tool", f"⛏️ `{name}`{suffix}"
+        else:
+            return "tool", f"⚙ `{name}`{suffix}"
 
     if event_type == "text":
         text = (event.get("text") or "").strip()
@@ -199,42 +233,68 @@ def _step_from_event(event: dict) -> tuple[str, str] | None:
     return None
 
 
-def _render_log(steps: list[tuple[str, str]]) -> str:
-    """Slož celou pending zprávu: hlavička + dosavadní kroky, každý na řádku.
-
-    Drží jen posledních `MAX_LOG_LINES` kroků, aby zpráva nepřerostla strop
-    chat.update; oříznutí naznačí vodorovné tři tečky.
-
-    Koncový `text` krok se nezobrazuje: je to finální odpověď, kterou jako
-    samostatnou zprávu zapisuje až následný krok workflow — jinak by ve Slacku
-    visela dvakrát (tady v logu i tam).
-    """
-    visible = steps[:-1] if steps and steps[-1][0] == "text" else steps
-    shown = visible[-MAX_LOG_LINES:]
-    lines = [PENDING_PREFIX]
-    if len(visible) > len(shown):
-        lines.append("…")
-    lines.extend(line for _, line in shown)
-    return "\n".join(lines)
-
-
 def main() -> int:
     channel = os.environ.get("TASK_HEADER_SLACK_CHANNEL", "")
     message_ts = os.environ.get("TASK_HEADER_SLACK_MESSAGE_TS", "")
-    # Pro assistant.threads.setStatus potřebujeme ts kořene threadu; u top-level
-    # mention je shodné s message_ts (viz slack_service.handle_event).
+    # Stream věšíme pod kořen threadu; u top-level mention je shodný s message_ts
+    # (viz slack_service.build_headers).
     thread_ts = os.environ.get("TASK_HEADER_SLACK_THREAD_TS", "") or message_ts
+    # Recipient potřebuje Slack jen u streamu do kanálu; v DM zůstanou prázdné.
+    recipient_user_id = os.environ.get("TASK_HEADER_SLACK_USER", "") or os.environ.get(
+        "TASK_HEADER_SLACK_USER_ID", ""
+    )
+    recipient_team_id = os.environ.get("TASK_HEADER_SLACK_TEAM", "") or os.environ.get(
+        "TASK_HEADER_SLACK_TEAM_ID", ""
+    )
     token = _resolve_token()
     min_interval = float(os.environ.get("SLACK_STREAM_INTERVAL", "3"))
-    enabled = bool(channel and message_ts and token)
+    enabled = bool(channel and thread_ts and token)
     if not enabled:
         print(
-            "slack-stream: chybí channel/ts/token, běžím jen jako tee", file=sys.stderr
+            "slack-stream: chybí channel/thread_ts/token, běžím jen jako tee",
+            file=sys.stderr,
         )
 
     steps: list[tuple[str, str]] = []
-    dirty = False
+    # Řádky čekající na přilepení do streamu (delta od posledního appendu).
+    pending: list[str] = []
+    # Poslední `text` krok držíme stranou: může to být finální odpověď, kterou do
+    # streamu nechceme. Přilepíme ho, až dorazí další krok (čímž se ukáže, že
+    # finální nebyl); pokud žádný další nepřijde, na konci ho zahodíme.
+    held_text: str | None = None
+    stream_ts: str | None = None
+    stream_failed = False
     last_sent = 0.0
+
+    def flush() -> None:
+        nonlocal stream_ts, stream_failed
+        if not pending or stream_failed:
+            return
+        chunk = "\n".join(pending)
+        if stream_ts is None:
+            stream_ts = _start_stream(
+                channel,
+                thread_ts,
+                token,
+                recipient_user_id=recipient_user_id,
+                recipient_team_id=recipient_team_id,
+                text=f"{STREAM_HEADER}\n{chunk}",
+            )
+            if stream_ts is None:
+                # Start streamu selhal (typicky chybí recipient_* u kanálu) — víc
+                # to nezkoušej, ať nezahltíš stderr, a doběhni jako čistý tee.
+                stream_failed = True
+                pending.clear()
+                return
+        else:
+            # appendStream připojuje, tak před delta řádky dej odřádkování.
+            _append_stream(channel, stream_ts, thread_ts, token, f"\n{chunk}")
+        pending.clear()
+        # Vedle streamu drž i nativní stav threadu, ať Slack ukazuje
+        # „<App> is working…“ i mimo tělo zprávy. Throttlujeme stejně.
+        status, loading_messages = _status_from_steps(steps)
+        _post_status(channel, thread_ts, token, status)
+
     for line in sys.stdin:
         sys.stdout.write(line)
         sys.stdout.flush()
@@ -247,28 +307,27 @@ def main() -> int:
         step = _step_from_event(event)
         if step and (not steps or steps[-1] != step):
             steps.append(step)
-            # `text` krok se zatím nerenderuje (může být koncová odpověď, kterou
-            # `_render_log` zahazuje), tak kvůli němu netrigujeme chat.update —
-            # ale nesmažeme dirty z dřívějšího kroku, ať se stihne doflushnout.
-            if step[0] != "text":
-                dirty = True
-        if dirty and time.monotonic() - last_sent >= min_interval:
-            _post_update(channel, message_ts, token, _render_log(steps))
-            # Vedle pending zprávy drž i nativní stav threadu, ať Slack ukazuje
-            # „<App> Pracuju na tom…“ i mimo tělo zprávy. Throttlujeme stejně.
-            status, loading_messages = _status_from_steps(steps)
-            _post_status(channel, thread_ts, token, status, loading_messages)
+            if held_text is not None:
+                # Dorazil novější krok, takže držený `text` nebyl finální —
+                # přilep ho a uvolni místo.
+                pending.append(held_text)
+                held_text = None
+            if step[0] == "text":
+                held_text = step[1]
+            else:
+                pending.append(step[1])
+        if pending and time.monotonic() - last_sent >= min_interval:
+            flush()
             last_sent = time.monotonic()
-            dirty = False
 
-    # Doraz poslední krok i když throttle okno ještě neuplynulo, ať je log
-    # kompletní pro toho, kdo se kouká až po doběhnutí.
-    if enabled and dirty:
-        _post_update(channel, message_ts, token, _render_log(steps))
-
-    # Smaž nativní stav threadu — agent doběhl, finální odpověď posílá až
-    # následný krok workflow a prázdný status sundá „Pracuju na tom…“.
+    # Doraz poslední nasbírané řádky i když throttle okno ještě neuplynulo, ať je
+    # stream kompletní; `held_text` (případná finální odpověď) zahazujeme.
     if enabled:
+        flush()
+        if stream_ts is not None:
+            _stop_stream(channel, stream_ts, thread_ts, token)
+        # Smaž nativní stav threadu — agent doběhl, prázdný status sundá
+        # „is working…“.
         _post_status(channel, thread_ts, token, "")
     return 0
 
