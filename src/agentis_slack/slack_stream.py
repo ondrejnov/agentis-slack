@@ -38,6 +38,24 @@ SNIPPET_LIMIT = 150
 # tohle drží zprávu pohodlně pod ním i s dlouhými řádky.
 MAX_LOG_LINES = 30
 
+# Generické "ještě nevím, co dělám" hlášky pro nativní stav threadu. Předáváme
+# je do `assistant.threads.setStatus` jako `loading_messages` (volitelné pole,
+# max 10) a rotaci skrz ně si řeší sám Slack. Zobrazí je jako „<App> <status>“,
+# takže to jsou slovesa ve 3. osobě jednotného čísla. Limit 10 nepřekračovat —
+# Slack delší pole odmítne.
+LOADING_MESSAGES = (
+    "rozjíždí pody…",
+    "čeká na zelenou pipelinu…",
+    "applyuje Terraform plan…",
+    "rolluje deploy bez výpadku…",
+    "honí flaky test v CI…",
+    "drainuje nódu před údržbou…",
+    "rotuje secrets ve vaultu…",
+    "kouká, kdo zase shodil main…",
+    "potvrzuje, že to není DNS… nebo je?",
+    "popíjí kafe, než dojede build…",
+)
+
 
 def _read_env_file(name: str) -> str:
     """Najdi proměnnou ``name`` v nejbližším ``.env`` od tohoto souboru nahoru.
@@ -88,6 +106,60 @@ def _post_update(channel: str, ts: str, token: str, text: str) -> None:
             )
     except Exception as exc:  # noqa: BLE001 — updater nesmí shodit běh agenta
         print(f"slack-stream: chat.update selhal: {exc}", file=sys.stderr)
+
+
+def _post_status(
+    channel: str,
+    thread_ts: str,
+    token: str,
+    status: str,
+    loading_messages: list[str] | None = None,
+) -> None:
+    """Nastav nativní stav assistant threadu přes `assistant.threads.setStatus`.
+
+    Slack ho zobrazí jako „<App> <status>“ v hlavičce threadu. Má ~2min timeout,
+    po kterém zmizí sám; prázdný ``status`` ho smaže ručně. Volitelné
+    ``loading_messages`` (max 10) Slack sám rotuje jako loading animaci, dokud
+    neznáme konkrétní krok. Stejně jako `_post_update` nikdy neshodí pipeline —
+    chyby jen loguje na stderr.
+    """
+    payload = {"channel_id": channel, "thread_ts": thread_ts, "status": status}
+    if loading_messages:
+        payload["loading_messages"] = loading_messages
+    request = urllib.request.Request(
+        "https://slack.com/api/assistant.threads.setStatus",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        if not body.get("ok"):
+            print(
+                f"slack-stream: setStatus odmítnut: {body.get('error')}",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001 — updater nesmí shodit běh agenta
+        print(f"slack-stream: setStatus selhal: {exc}", file=sys.stderr)
+
+
+def _status_from_steps(steps: list[tuple[str, str]]) -> tuple[str, list[str] | None]:
+    """Nativní stav threadu z posledního dění: ``(status, loading_messages)``.
+
+    Bere poslední ne-`text` krok (finální odpověď stav nepopisuje) a zbaví ho
+    mrkdwn backticků, ať se ve stavovém řádku nezobrazí doslova — ten vrací jako
+    konkrétní ``status`` bez rotace. Když ještě žádný krok není, vrátí první
+    devops hlášku jako ``status`` a celý pool jako ``loading_messages``, mezi
+    kterými pak Slack rotuje sám.
+    """
+    return "is working...", None
+    # for kind, line in reversed(steps):
+    #     if kind != "text":
+    #         return line.replace("`", ""), list(LOADING_MESSAGES)
+    # return LOADING_MESSAGES[0], list(LOADING_MESSAGES)
 
 
 def _step_from_event(event: dict) -> tuple[str, str] | None:
@@ -149,6 +221,9 @@ def _render_log(steps: list[tuple[str, str]]) -> str:
 def main() -> int:
     channel = os.environ.get("TASK_HEADER_SLACK_CHANNEL", "")
     message_ts = os.environ.get("TASK_HEADER_SLACK_MESSAGE_TS", "")
+    # Pro assistant.threads.setStatus potřebujeme ts kořene threadu; u top-level
+    # mention je shodné s message_ts (viz slack_service.handle_event).
+    thread_ts = os.environ.get("TASK_HEADER_SLACK_THREAD_TS", "") or message_ts
     token = _resolve_token()
     min_interval = float(os.environ.get("SLACK_STREAM_INTERVAL", "3"))
     enabled = bool(channel and message_ts and token)
@@ -179,6 +254,10 @@ def main() -> int:
                 dirty = True
         if dirty and time.monotonic() - last_sent >= min_interval:
             _post_update(channel, message_ts, token, _render_log(steps))
+            # Vedle pending zprávy drž i nativní stav threadu, ať Slack ukazuje
+            # „<App> Pracuju na tom…“ i mimo tělo zprávy. Throttlujeme stejně.
+            status, loading_messages = _status_from_steps(steps)
+            _post_status(channel, thread_ts, token, status, loading_messages)
             last_sent = time.monotonic()
             dirty = False
 
@@ -186,6 +265,11 @@ def main() -> int:
     # kompletní pro toho, kdo se kouká až po doběhnutí.
     if enabled and dirty:
         _post_update(channel, message_ts, token, _render_log(steps))
+
+    # Smaž nativní stav threadu — agent doběhl, finální odpověď posílá až
+    # následný krok workflow a prázdný status sundá „Pracuju na tom…“.
+    if enabled:
+        _post_status(channel, thread_ts, token, "")
     return 0
 
 
