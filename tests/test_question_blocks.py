@@ -1,6 +1,7 @@
 from agentis_slack.slack_blocks import (
     QUESTION_OPEN_ACTION,
     QUESTION_SUBMIT_CALLBACK,
+    build_answered_blocks,
     build_question_modal,
     parse_modal_submission,
     question_prompt_blocks,
@@ -138,3 +139,31 @@ def test_parse_submission_flags_empty_optional_question():
     )
     _external_id, _channel, _ts, _results, errors = parse_modal_submission(view)
     assert "q-multi" in errors
+
+
+def test_answered_blocks_show_question_name_and_chosen_answer():
+    view = {
+        "private_metadata": (
+            '{"e": "ext-1", "c": "C1", "ts": "111.0",'
+            ' "q": {"q-env": "Prostředí", "q-note": "Poznámka"}}'
+        ),
+        "state": {
+            "values": {
+                "q-env": {
+                    "opt": {
+                        "selected_options": [
+                            {"text": {"type": "plain_text", "text": "prod"}, "value": "o-prod"},
+                            {"text": {"type": "plain_text", "text": "api"}, "value": "o-api"},
+                        ]
+                    }
+                },
+                "q-note::free": {"free": {"value": "  s opatrností  "}},
+            }
+        },
+    }
+    text, blocks = build_answered_blocks(view)
+
+    assert text == "✅ Zodpovězeno"
+    body = blocks[1]["text"]["text"]
+    assert "*Prostředí*\n› prod, api" in body
+    assert "*Poznámka*\n› s opatrností" in body

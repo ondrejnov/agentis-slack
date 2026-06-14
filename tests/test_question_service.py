@@ -76,7 +76,9 @@ def test_open_modal_fetches_group_and_opens_view():
     assert agentis.task_id == "task-1"
     assert len(client.opened) == 1
     view = client.opened[0]["view"]
-    assert view["private_metadata"] == '{"e": "ext-1", "c": "C1", "ts": "111.0"}'
+    assert view["private_metadata"] == (
+        '{"e": "ext-1", "c": "C1", "ts": "111.0", "q": {"q-1": "Env"}}'
+    )
 
 
 def test_submit_modal_replies_and_marks_answered():

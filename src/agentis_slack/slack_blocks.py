@@ -38,6 +38,9 @@ _FREEFORM_SUFFIX = "::free"
 # section bloku (text až ~3000 znaků), ne přes option.description.
 _OPTION_LABEL_LIMIT = 75
 _SECTION_TEXT_LIMIT = 2900
+# Název otázky ve shrnutí po odeslání; private_metadata má strop ~3000 znaků,
+# tak držíme labely krátké, ať se vejde i delší dávka otázek.
+_QUESTION_LABEL_LIMIT = 150
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -128,9 +131,13 @@ def build_question_modal(
     submitu). Bez options je povinný volný text.
     """
     blocks: list[dict[str, Any]] = []
+    labels: dict[str, str] = {}
     for question in group.get("questions") or []:
         qid = str(question["id"])
         header = (question.get("header") or "").strip()
+        # Název otázky pro pozdější shrnutí ("otázka → odpověď") – state submitu
+        # nese jen labely voleb, ne text otázky, tak ho protáhneme metadatem.
+        labels[qid] = _truncate(header or (question.get("question") or ""), _QUESTION_LABEL_LIMIT)
         if header:
             blocks.append(
                 {"type": "context", "elements": [{"type": "mrkdwn", "text": f"*{header}*"}]}
@@ -191,7 +198,7 @@ def build_question_modal(
             )
 
     private_metadata = json.dumps(
-        {"e": str(group.get("external_id")), "c": channel, "ts": message_ts}
+        {"e": str(group.get("external_id")), "c": channel, "ts": message_ts, "q": labels}
     )
     return {
         "type": "modal",
@@ -202,6 +209,35 @@ def build_question_modal(
         "close": {"type": "plain_text", "text": "Zrušit"},
         "blocks": blocks,
     }
+
+
+def _collect_per_question(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Z ``view.state.values`` poskládej ``{qid: {"selected": [...], "text": ...}}``.
+
+    ``selected`` drží celé option objekty ze stavu (``{"text": {...}, "value"}``),
+    ať z nich umí ``parse_modal_submission`` vzít ``value`` (pro API) a shrnutí zas
+    ``text.text`` (čitelný label). Options i volný text téže otázky sdílí ``qid``.
+    """
+    per_question: dict[str, dict[str, Any]] = {}
+    for block_id, actions in state.items():
+        if block_id.endswith(_FREEFORM_SUFFIX):
+            qid = block_id[: -len(_FREEFORM_SUFFIX)]
+            value = (actions.get(_FREEFORM_ACTION) or {}).get("value")
+            entry = per_question.setdefault(qid, {"selected": [], "text": None})
+            entry["text"] = (value or "").strip() or None
+        else:
+            qid = block_id
+            action = actions.get(_OPTION_ACTION) or {}
+            selected: list[dict[str, Any]] = []
+            if "selected_option" in action:
+                chosen = action.get("selected_option")
+                if chosen:
+                    selected = [chosen]
+            elif "selected_options" in action:
+                selected = list(action.get("selected_options") or [])
+            entry = per_question.setdefault(qid, {"selected": [], "text": None})
+            entry["selected"] = selected
+    return per_question
 
 
 def parse_modal_submission(
@@ -219,30 +255,12 @@ def parse_modal_submission(
     message_ts = str(metadata.get("ts") or "")
 
     state = (view.get("state") or {}).get("values") or {}
-    per_question: dict[str, dict[str, Any]] = {}
-    for block_id, actions in state.items():
-        if block_id.endswith(_FREEFORM_SUFFIX):
-            qid = block_id[: -len(_FREEFORM_SUFFIX)]
-            value = (actions.get(_FREEFORM_ACTION) or {}).get("value")
-            entry = per_question.setdefault(qid, {"selected": [], "text": None})
-            entry["text"] = (value or "").strip() or None
-        else:
-            qid = block_id
-            action = actions.get(_OPTION_ACTION) or {}
-            selected: list[str] = []
-            if "selected_option" in action:
-                chosen = action.get("selected_option")
-                if chosen:
-                    selected = [str(chosen["value"])]
-            elif "selected_options" in action:
-                selected = [str(option["value"]) for option in action.get("selected_options") or []]
-            entry = per_question.setdefault(qid, {"selected": [], "text": None})
-            entry["selected"] = selected
+    per_question = _collect_per_question(state)
 
     results: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
     for qid, data in per_question.items():
-        selected = data.get("selected") or []
+        selected = [str(option["value"]) for option in data.get("selected") or []]
         text = data.get("text")
         if not selected and not text:
             errors[qid] = "Vyber možnost nebo napiš vlastní odpověď."
@@ -251,3 +269,35 @@ def parse_modal_submission(
         )
 
     return external_id, channel, message_ts, results, errors
+
+
+def build_answered_blocks(view: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Z odeslaného modalu poskládej shrnutí „otázka → zvolená odpověď".
+
+    Vrací ``(text, blocks)`` pro ``chat.update`` původní prompt zprávy. Název
+    otázky bere z ``private_metadata`` (``q``), labely voleb i volný text ze
+    ``state``. Slouží jako náhrada za dřívější holé „✅ Zodpovězeno".
+    """
+    metadata = json.loads(view.get("private_metadata") or "{}")
+    labels = metadata.get("q") or {}
+    state = (view.get("state") or {}).get("values") or {}
+    per_question = _collect_per_question(state)
+
+    lines: list[str] = []
+    for qid, data in per_question.items():
+        name = (labels.get(qid) or "Otázka").strip()
+        answers = [
+            str((option.get("text") or {}).get("text") or option.get("value") or "").strip()
+            for option in data.get("selected") or []
+        ]
+        if data.get("text"):
+            answers.append(str(data["text"]).strip())
+        answer = ", ".join(part for part in answers if part) or "—"
+        lines.append(f"*{name}*\n› {answer}")
+
+    body = "\n\n".join(lines) if lines else "✅ *Zodpovězeno*"
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "✅ *Zodpovězeno*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
+    ]
+    return "✅ Zodpovězeno", blocks

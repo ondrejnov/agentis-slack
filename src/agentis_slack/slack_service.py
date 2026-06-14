@@ -7,7 +7,11 @@ from agentis_slack.agentis_client import AgentisClient
 
 from .config import Settings
 from .guards import EventDeduper, GlobalRateLimiter, should_ignore_event
-from .slack_blocks import build_question_modal, parse_modal_submission
+from .slack_blocks import (
+    build_answered_blocks,
+    build_question_modal,
+    parse_modal_submission,
+)
 from .text import normalize_slack_text, slack_history_to_context
 
 
@@ -179,7 +183,8 @@ class SlackMentionService:
         except Exception as e:
             print(e)
             return
-        self._mark_question_answered(channel, message_ts, client)
+        text, blocks = build_answered_blocks(view)
+        self._mark_question_answered(channel, message_ts, client, text, blocks)
 
     def _find_question_group(self, task_id: str, external_id: str) -> dict[str, Any] | None:
         try:
@@ -192,20 +197,22 @@ class SlackMentionService:
                 return group
         return None
 
-    def _mark_question_answered(self, channel: str, message_ts: str, client: Any) -> None:
+    def _mark_question_answered(
+        self,
+        channel: str,
+        message_ts: str,
+        client: Any,
+        text: str,
+        blocks: list[dict[str, Any]],
+    ) -> None:
         if not channel or not message_ts:
             return
         try:
             client.chat_update(
                 channel=channel,
                 ts=message_ts,
-                text="✅ Zodpovězeno",
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": "✅ *Zodpovězeno*"},
-                    }
-                ],
+                text=text,
+                blocks=blocks,
             )
         except Exception as e:
             print(e)
