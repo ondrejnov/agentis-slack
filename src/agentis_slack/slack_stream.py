@@ -278,7 +278,7 @@ def main() -> int:
                 token,
                 recipient_user_id=recipient_user_id,
                 recipient_team_id=recipient_team_id,
-                text=f"{STREAM_HEADER}\n{chunk}",
+                text=f"{chunk}",
             )
             if stream_ts is None:
                 # Start streamu selhal (typicky chybí recipient_* u kanálu) — víc
