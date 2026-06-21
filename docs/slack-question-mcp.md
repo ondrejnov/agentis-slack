@@ -45,7 +45,8 @@ přepni `ask-question` na tenhle server:
 ```
 
 `cwd` = repo `agentis-slack`, ať se z jeho `.env` načte `AGENTIS_API_URL`,
-`AGENTIS_TOKEN` a `SLACK_BOT_TOKEN` (přes `Settings.from_env`). Balík je
+`AGENTIS_TOKEN`, `AGENTIS_SERVICE_TOKEN` a `SLACK_BOT_TOKEN` (přes
+`Settings.from_env`). Balík je
 editable-installed, takže `-m agentis_slack.question_mcp` jede odkudkoli; lze
 použít i console script `/var/www/agentis-slack/.venv/bin/agentis-slack-mcp`.
 
@@ -56,7 +57,8 @@ z task headers automaticky (`common/models.py`).
 
 | Proměnná | Význam | Default |
 |---|---|---|
-| `AGENTIS_API_URL`, `AGENTIS_TOKEN` | backend JSON-RPC (z `.env`) | – |
+| `AGENTIS_API_URL`, `AGENTIS_TOKEN` | user-facing backend JSON-RPC (z `.env`) | – |
+| `AGENTIS_SERVICE_TOKEN` | service-only backend JSON-RPC pro `task.add_question` / polling | – |
 | `SLACK_BOT_TOKEN` | post promptu do threadu (z `.env`) | – |
 | `AGENTIS_MCP_ANSWER_TIMEOUT` | timeout čekání na odpověď (s) | `900` |
 | `AGENTIS_MCP_POLL_INTERVAL` | interval pollingu (s) | `1` |

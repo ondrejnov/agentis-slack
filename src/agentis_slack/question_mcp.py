@@ -248,7 +248,11 @@ def _wait_for_answer(
 def build_server() -> FastMCP:
     _setup_logger()
     settings = Settings.from_env()
-    client = AgentisClient(settings.agentis_api_url, settings.agentis_token)
+    client = AgentisClient(
+        settings.agentis_api_url,
+        settings.agentis_token,
+        service_token=settings.agentis_service_token,
+    )
     answer_timeout = _float_env("AGENTIS_MCP_ANSWER_TIMEOUT", 900.0)
     poll_interval = _float_env("AGENTIS_MCP_POLL_INTERVAL", 1.0)
     logger.info("Agentis Slack MCP starting (base_url=%s)", settings.agentis_api_url)

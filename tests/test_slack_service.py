@@ -28,6 +28,10 @@ class FakeAgentisClient:
         self.saved_payload = payload
         return {"form": {"id": "task-1"}}
 
+    def start_run(self, task_id):
+        self.started_task_id = task_id
+        return {"ok": True}
+
 
 def test_handle_app_mention_creates_task_and_acknowledges():
     slack = FakeSlackClient()

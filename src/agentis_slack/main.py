@@ -14,7 +14,11 @@ def create_app(settings: Settings) -> App:
     auth = app.client.auth_test()
     service = SlackMentionService(
         slack_client=app.client,
-        agentis_client=AgentisClient(settings.agentis_api_url, settings.agentis_token),
+        agentis_client=AgentisClient(
+            settings.agentis_api_url,
+            settings.agentis_token,
+            service_token=settings.agentis_service_token,
+        ),
         settings=settings,
         bot_user_id=auth.get("user_id"),
         rate_limit_max_events=settings.rate_limit_max_events,

@@ -34,6 +34,7 @@ class Settings:
     rate_limit_max_events: int = 30
     agentis_api_url: str = ""
     agentis_token: str = ""
+    agentis_service_token: str = ""
     default_project: str = ""
     default_agent: str = ""
     default_model: str = ""
@@ -57,6 +58,7 @@ class Settings:
             rate_limit_max_events=int(os.getenv("SLACK_RATE_LIMIT_MAX_EVENTS", "30")),
             agentis_api_url=os.getenv("AGENTIS_API_URL", ""),
             agentis_token=os.getenv("AGENTIS_TOKEN", ""),
+            agentis_service_token=os.getenv("AGENTIS_SERVICE_TOKEN", ""),
             default_project=os.getenv("AGENTIS_DEFAULT_PROJECT", ""),
             default_agent=os.getenv("AGENTIS_DEFAULT_AGENT", ""),
             default_model=os.getenv("AGENTIS_DEFAULT_MODEL", ""),

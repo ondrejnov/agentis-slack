@@ -12,13 +12,37 @@ class AgentisRpcError(RuntimeError):
 
 
 class AgentisClient:
-    def __init__(self, api_url: str, service_token: str, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        api_url: str,
+        api_token: str,
+        *,
+        service_token: str = "",
+        timeout: float = 60.0,
+    ) -> None:
         self.api_url = api_url
+        self.api_token = api_token
         self.service_token = service_token
         self.timeout = timeout
         self._ids = itertools.count(1)
 
-    def rpc(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    def _headers(self, *, use_service_token: bool) -> dict[str, str]:
+        if use_service_token:
+            if not self.service_token:
+                raise RuntimeError("Missing AGENTIS_SERVICE_TOKEN for service RPC")
+            return {"X-Service-Token": self.service_token}
+        return {
+            "X-Auth-Token": self.api_token,
+            "Authorization": f"Bearer {self.api_token}",
+        }
+
+    def rpc(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        use_service_token: bool = False,
+    ) -> Any:
         response = requests.post(
             self.api_url,
             json={
@@ -27,10 +51,7 @@ class AgentisClient:
                 "method": method,
                 "params": params or {},
             },
-            headers={
-                "X-Auth-Token": f"{self.service_token}",
-                "Authorization": f"Bearer {self.service_token}",
-            },
+            headers=self._headers(use_service_token=use_service_token),
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -54,7 +75,7 @@ class AgentisClient:
         )
 
     def add_agent_comment(self, **params: Any) -> dict:
-        return self.rpc("task.add_agent_comment", params)
+        return self.rpc("task.add_agent_comment", params, use_service_token=True)
 
     def store_session_id(self, run_id: str, session_id: str) -> dict:
         return self.rpc(
@@ -65,6 +86,7 @@ class AgentisClient:
         return self.rpc(
             "session.store_activity_log",
             {"session_id": session_id, "messages": messages},
+            use_service_token=True,
         )
 
     def adapter_event(
@@ -97,10 +119,14 @@ class AgentisClient:
         params: dict[str, Any] = {"id": external_id, "questions": questions}
         if session_id:
             params["session_id"] = session_id
-        return self.rpc("task.add_question", params)
+        return self.rpc("task.add_question", params, use_service_token=True)
 
     def get_question_result(self, external_id: str) -> dict:
-        return self.rpc("task.get_question_result", {"external_id": external_id})
+        return self.rpc(
+            "task.get_question_result",
+            {"external_id": external_id},
+            use_service_token=True,
+        )
 
     def fetch_task(self, task_id: str) -> dict:
         return self.rpc("task.fetch", {"id": task_id})
@@ -116,7 +142,7 @@ class AgentisClient:
                 self.api_url.rsplit("/api", 1)[0] + "/api/file/upload",
                 files={"file": (label or path.name, file_obj)},
                 headers={
-                    "X-Auth-Token": self.service_token,
+                    "X-Auth-Token": self.api_token,
                 },
                 timeout=self.timeout,
             )
